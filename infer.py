@@ -14,7 +14,7 @@ from utils.general import (
 )
 from utils.torch_utils import select_device
 
-DEBUG = True
+DEBUG = False
 
 if DEBUG:
     from utils.plots import colors, plot_one_box
@@ -129,9 +129,8 @@ def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, 
     gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(device)  # normalization gain whwh
     h, w, c = img0.shape
 
-    if DEBUG:
-        # Get class names
-        names = objects_model.module.names if hasattr(objects_model, 'module') else objects_model.names
+    # Get class names
+    names = objects_model.module.names if hasattr(objects_model, 'module') else objects_model.names
 
     # Objects Inference
 
@@ -144,6 +143,7 @@ def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, 
         for j, (*xyxy, conf, cls) in enumerate(det):
             xywh = (xyxy2xywh(det[j, :4].view(1, 4)) / gn).view(-1)
             xywh = xywh.data.cpu().numpy()
+
             x1 = int(xywh[0] * w - 0.5 * xywh[2] * w)
             y1 = int(xywh[1] * h - 0.5 * xywh[3] * h)
             x2 = int(xywh[0] * w + 0.5 * xywh[2] * w)
@@ -173,7 +173,6 @@ def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, 
             xywh = (xyxy2xywh(det[j, :4].view(1, 4)) / gn).view(-1)
             xywh = xywh.data.cpu().numpy()
 
-            # class_num = det[j, 15].cpu().numpy()
             x1 = int(xywh[0] * w - 0.5 * xywh[2] * w)
             y1 = int(xywh[1] * h - 0.5 * xywh[3] * h)
             x2 = int(xywh[0] * w + 0.5 * xywh[2] * w)
@@ -190,12 +189,12 @@ def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, 
 
 
 @torch.no_grad()
-def load_models_and_run(
+def infer_image(
         img_file,
         device='0',
         face_weights='weights/yolov5s-face.pt',
         objects_weights='weights/yolov5m.pt'
-    ):
+):
     img = cv2.imread(img_file)
 
     inf_device = select_device(device)
@@ -212,33 +211,3 @@ def load_models_and_run(
         cv2.imwrite('test.jpg', img)
 
     return boxes
-
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default='weights/yolov5s-face.pt', help='model.pt path(s)')
-    parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.8, help='object confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
-    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
-    parser.add_argument('--augment', action='store_true', help='augmented inference')
-    parser.add_argument('--image', type=str, help='image file to process')
-    opt = parser.parse_args()
-    print(opt)
-
-    # Load model
-    device = select_device(opt.device)
-    model = attempt_load(opt.weights, map_location=device)  # load FP32 model
-
-    print('Model Loaded')
-    start = time.time()
-    with torch.no_grad():
-        img0 = cv2.imread(opt.image)  # BGR
-        boxes = detect(model, img0)
-        cv2.imwrite('test.jpg', img0)
-        for box in boxes:
-            print('%d %d %d %d (%.03f) => %s' % (box[0], box[1], box[2], box[3], box[4] if box[4] <= 1 else 1, box[5]) + '\n')
-
-    print('Completed in {:.3f}'.format(time.time() - start))
