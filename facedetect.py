@@ -9,9 +9,15 @@ from models.experimental import attempt_load
 from utils.datasets import letterbox
 from utils.general import (
     check_img_size, scale_coords,
-    xyxy2xywh, xywh2xyxy
+    xyxy2xywh, xywh2xyxy,
+    non_max_suppression
 )
 from utils.torch_utils import select_device
+
+DEBUG = True
+
+if DEBUG:
+    from utils.plots import colors, plot_one_box
 
 
 def non_max_suppression_face(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, labels=()):
@@ -25,7 +31,7 @@ def non_max_suppression_face(prediction, conf_thres=0.25, iou_thres=0.45, classe
 
     # Settings
     min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
-    time_limit = 10.0  # seconds to quit after
+    time_limit = 1.0  # seconds to quit after
     redundant = True  # require redundant detections
     multi_label = nc > 1  # multiple labels per box (adds 0.5ms/img)
     merge = False  # use merge-NMS
@@ -97,68 +103,20 @@ def non_max_suppression_face(prediction, conf_thres=0.25, iou_thres=0.45, classe
 def dynamic_resize(shape, stride=64):
     max_size = max(shape[0], shape[1])
     if max_size % stride != 0:
-        max_size = (int(max_size / stride) + 1) * stride 
+        max_size = (int(max_size / stride) + 1) * stride
 
     return max_size
 
 
-def scale_coords_landmarks(img1_shape, coords, img0_shape, ratio_pad=None):
-    # Rescale coords (xyxy) from img1_shape to img0_shape
-    if ratio_pad is None:  # calculate from img0_shape
-        gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])  # gain  = old / new
-        pad = (img1_shape[1] - img0_shape[1] * gain) / 2, (img1_shape[0] - img0_shape[0] * gain) / 2  # wh padding
-    else:
-        gain = ratio_pad[0][0]
-        pad = ratio_pad[1]
-
-    coords[:, [0, 2, 4, 6, 8]] -= pad[0]  # x padding
-    coords[:, [1, 3, 5, 7, 9]] -= pad[1]  # y padding
-    coords[:, :10] /= gain
-    # clip_coords(coords, img0_shape)
-    coords[:, 0].clamp_(0, img0_shape[1])  # x1
-    coords[:, 1].clamp_(0, img0_shape[0])  # y1
-    coords[:, 2].clamp_(0, img0_shape[1])  # x2
-    coords[:, 3].clamp_(0, img0_shape[0])  # y2
-    coords[:, 4].clamp_(0, img0_shape[1])  # x3
-    coords[:, 5].clamp_(0, img0_shape[0])  # y3
-    coords[:, 6].clamp_(0, img0_shape[1])  # x4
-    coords[:, 7].clamp_(0, img0_shape[0])  # y4
-    coords[:, 8].clamp_(0, img0_shape[1])  # x5
-    coords[:, 9].clamp_(0, img0_shape[0])  # y5
-    return coords
-
-
-def show_results(img, xywh, conf, landmarks, class_num):
-    h, w, c = img.shape
-    tl = 1 or round(0.002 * (h + w) / 2) + 1  # line/font thickness
-    x1 = int(xywh[0] * w - 0.5 * xywh[2] * w)
-    y1 = int(xywh[1] * h - 0.5 * xywh[3] * h)
-    x2 = int(xywh[0] * w + 0.5 * xywh[2] * w)
-    y2 = int(xywh[1] * h + 0.5 * xywh[3] * h)
-    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), thickness=tl, lineType=cv2.LINE_AA)
-
-    # clors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255)]
-
-    # for i in range(5):
-    #     point_x = int(landmarks[2 * i] * w)
-    #     point_y = int(landmarks[2 * i + 1] * h)
-    #     cv2.circle(img, (point_x, point_y), tl+1, clors[i], -1)
-
-    tf = max(tl - 1, 1)  # font thickness
-    label = 'face: ' + str(conf)[:5]
-    cv2.putText(img, label, (x1, y1 - 2), 0, tl / 1.5, [32, 32, 224], thickness=tf, lineType=cv2.LINE_AA)
-    return img
-
-
-def detect(model, img0):
-    stride = int(model.stride.max())  # model stride
-    imgsz = opt.img_size
+def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, augment=False):
+    stride = int(face_model.stride.max())  # model stride
     if imgsz <= 0:                    # original size
         imgsz = dynamic_resize(img0.shape)
-    imgsz = check_img_size(imgsz, s=64)  # check img_size
+    imgsz = check_img_size(imgsz, s=stride)  # check img_size
     img = letterbox(img0, imgsz)[0]
+
     # Convert
-    img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+    img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
     img = np.ascontiguousarray(img)
     img = torch.from_numpy(img).to(device)
     img = img.float()  # uint8 to fp16/32
@@ -166,31 +124,96 @@ def detect(model, img0):
     if img.ndimension() == 3:
         img = img.unsqueeze(0)
 
-    # Inference
-    pred = model(img, augment=opt.augment)[0]
-    # Apply NMS
-    pred = non_max_suppression_face(pred, opt.conf_thres, opt.iou_thres)[0]
-    gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(device)  # normalization gain whwh
-    # gn_lks = torch.tensor(img0.shape)[[1, 0, 1, 0, 1, 0, 1, 0, 1, 0]].to(device)  # normalization gain landmarks
     boxes = []
+
+    gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(device)  # normalization gain whwh
     h, w, c = img0.shape
-    if pred is not None:
-        pred[:, :4] = scale_coords(img.shape[2:], pred[:, :4], img0.shape).round()
-        pred[:, 5:15] = scale_coords_landmarks(img.shape[2:], pred[:, 5:15], img0.shape).round()
-        for j in range(pred.size()[0]):
-            xywh = (xyxy2xywh(pred[j, :4].view(1, 4)) / gn).view(-1)
+
+    if DEBUG:
+        # Get class names
+        names = objects_model.module.names if hasattr(objects_model, 'module') else objects_model.names
+
+    # Objects Inference
+
+    pred = objects_model(img, augment=augment)[0]
+    # Apply NMS
+    det = non_max_suppression(pred, conf_thres=0.5, iou_thres=0.45, max_det=16)[0]
+
+    if det is not None:
+        det[:, :4] = scale_coords(img.shape[2:], det[:, :4], img0.shape).round()
+        for j, (*xyxy, conf, cls) in enumerate(det):
+            xywh = (xyxy2xywh(det[j, :4].view(1, 4)) / gn).view(-1)
             xywh = xywh.data.cpu().numpy()
-            conf = pred[j, 4].cpu().numpy()
-            # landmarks = (pred[j, 5:15].view(1, 10) / gn_lks).view(-1).tolist()
-            class_num = pred[j, 15].cpu().numpy()
             x1 = int(xywh[0] * w - 0.5 * xywh[2] * w)
             y1 = int(xywh[1] * h - 0.5 * xywh[3] * h)
             x2 = int(xywh[0] * w + 0.5 * xywh[2] * w)
             y2 = int(xywh[1] * h + 0.5 * xywh[3] * h)
-            boxes.append([x1, y1, x2 - x1, y2 - y1, conf])
+            conf = round(float(conf.cpu().numpy()), 3)
 
-            show_results(img0, xywh, conf, [], class_num)
+            # Get class name
+            icls = int(cls)  # integer class
+            name = names[icls]
+
+            boxes.append([x1, y1, x2 - x1, y2 - y1, conf, name])
+
+            if DEBUG:
+                plot_one_box(xyxy, img0, label=f'{name} {conf:.2f}', color=colors(cls, True))
+
+    # Face Inference
+
+    pred = face_model(img, augment=augment)[0]
+    # Apply NMS
+    det = non_max_suppression_face(pred, conf_thres=0.8, iou_thres=0.5)[0]
+
+    gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(device)  # normalization gain whwh
+
+    if det is not None:
+        det[:, :4] = scale_coords(img.shape[2:], det[:, :4], img0.shape).round()
+        for j, (*xyxy, conf, cls) in enumerate(det):
+            xywh = (xyxy2xywh(det[j, :4].view(1, 4)) / gn).view(-1)
+            xywh = xywh.data.cpu().numpy()
+
+            # class_num = det[j, 15].cpu().numpy()
+            x1 = int(xywh[0] * w - 0.5 * xywh[2] * w)
+            y1 = int(xywh[1] * h - 0.5 * xywh[3] * h)
+            x2 = int(xywh[0] * w + 0.5 * xywh[2] * w)
+            y2 = int(xywh[1] * h + 0.5 * xywh[3] * h)
+            conf = round(float(det[j, 4].cpu().numpy()), 3)
+
+            boxes.append([x1, y1, x2 - x1, y2 - y1, conf, "face"])
+
+            if DEBUG:
+                plot_one_box(xyxy, img0, label=f'face {conf:.2f}', color=colors(1, True))
+
     return boxes
+
+
+
+@torch.no_grad()
+def load_models_and_run(
+        img_file,
+        device='0',
+        face_weights='weights/yolov5s-face.pt',
+        objects_weights='weights/yolov5m.pt'
+    ):
+    img = cv2.imread(img_file)
+
+    inf_device = select_device(device)
+    face_model = attempt_load(face_weights, map_location=inf_device)
+    objects_model = attempt_load(objects_weights, map_location=inf_device)
+
+    if DEBUG:
+        start = time.time()
+
+    boxes = face_and_objects_detect(inf_device, face_model, objects_model, img)
+
+    if DEBUG:
+        print('Completed in {:.1f}ms'.format((time.time() - start) * 1000))
+        cv2.imwrite('test.jpg', img)
+
+    return boxes
+
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -212,10 +235,10 @@ if __name__ == '__main__':
     print('Model Loaded')
     start = time.time()
     with torch.no_grad():
-        img0 = cv2.imread(opt.image)  # BGR 
+        img0 = cv2.imread(opt.image)  # BGR
         boxes = detect(model, img0)
         cv2.imwrite('test.jpg', img0)
         for box in boxes:
-            print('%d %d %d %d %.03f' % (box[0], box[1], box[2], box[3], box[4] if box[4] <= 1 else 1) + '\n')
+            print('%d %d %d %d (%.03f) => %s' % (box[0], box[1], box[2], box[3], box[4] if box[4] <= 1 else 1, box[5]) + '\n')
 
     print('Completed in {:.3f}'.format(time.time() - start))
