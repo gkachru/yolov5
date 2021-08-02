@@ -108,8 +108,15 @@ def dynamic_resize(shape, stride=64):
     return max_size
 
 
-def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, augment=False):
-    stride = int(face_model.stride.max())  # model stride
+class ObjectModel:
+    def __init__(self, device_id, face_weights, objects_weights):
+        self.device = select_device(device_id)
+        self.face = attempt_load(face_weights, map_location=self.device)
+        self.objects = attempt_load(objects_weights, map_location=self.device)
+
+
+def face_and_objects_detect(model, img0, imgsz=640, augment=False):
+    stride = int(model.face.stride.max())  # model stride
     if imgsz <= 0:                    # original size
         imgsz = dynamic_resize(img0.shape)
     imgsz = check_img_size(imgsz, s=stride)  # check img_size
@@ -118,7 +125,7 @@ def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, 
     # Convert
     img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
     img = np.ascontiguousarray(img)
-    img = torch.from_numpy(img).to(device)
+    img = torch.from_numpy(img).to(model.device)
     img = img.float()  # uint8 to fp16/32
     img /= 255.0  # 0 - 255 to 0.0 - 1.0
     if img.ndimension() == 3:
@@ -126,15 +133,15 @@ def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, 
 
     boxes = []
 
-    gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(device)  # normalization gain whwh
+    gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(model.device)  # normalization gain whwh
     h, w, c = img0.shape
 
     # Get class names
-    names = objects_model.module.names if hasattr(objects_model, 'module') else objects_model.names
+    names = model.objects.module.names if hasattr(model.objects, 'module') else model.objects.names
 
     # Objects Inference
 
-    pred = objects_model(img, augment=augment)[0]
+    pred = model.objects(img, augment=augment)[0]
     # Apply NMS
     det = non_max_suppression(pred, conf_thres=0.5, iou_thres=0.45, max_det=16)[0]
 
@@ -161,11 +168,11 @@ def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, 
 
     # Face Inference
 
-    pred = face_model(img, augment=augment)[0]
+    pred = model.face(img, augment=augment)[0]
     # Apply NMS
     det = non_max_suppression_face(pred, conf_thres=0.8, iou_thres=0.5)[0]
 
-    gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(device)  # normalization gain whwh
+    # gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(model.device)  # normalization gain whwh
 
     if det is not None:
         det[:, :4] = scale_coords(img.shape[2:], det[:, :4], img0.shape).round()
@@ -187,7 +194,6 @@ def face_and_objects_detect(device, face_model, objects_model, img0, imgsz=640, 
     return boxes
 
 
-
 @torch.no_grad()
 def infer_image(
         img_file,
@@ -195,16 +201,14 @@ def infer_image(
         face_weights='weights/yolov5s-face.pt',
         objects_weights='weights/yolov5m.pt'
 ):
-    img = cv2.imread(img_file)
 
-    inf_device = select_device(device)
-    face_model = attempt_load(face_weights, map_location=inf_device)
-    objects_model = attempt_load(objects_weights, map_location=inf_device)
+    model = ObjectModel(device, face_weights, objects_weights)
 
     if DEBUG:
         start = time.time()
 
-    boxes = face_and_objects_detect(inf_device, face_model, objects_model, img)
+    img = cv2.imread(img_file)
+    boxes = face_and_objects_detect(model, img)
 
     if DEBUG:
         print('Completed in {:.1f}ms'.format((time.time() - start) * 1000))
