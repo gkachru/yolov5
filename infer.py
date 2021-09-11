@@ -14,10 +14,10 @@ from utils.general import (
 )
 from utils.torch_utils import select_device
 
-DEBUG = False
+DEBUG = True
 
 if DEBUG:
-    from utils.plots import colors, plot_one_box
+    from utils.plots import colors, Annotator
 
 
 def non_max_suppression_face(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, labels=()):
@@ -108,11 +108,53 @@ def dynamic_resize(shape, stride=64):
     return max_size
 
 
+def bbox_iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2] + boxA[0], boxB[2] + boxB[0])
+    yB = min(boxA[3] + boxA[1], boxB[3] + boxB[1])
+    interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
+    boxAArea = (boxA[2] + 1) * (boxA[3] + 1)
+    boxBArea = (boxB[2] + 1) * (boxB[3] + 1)
+    iou = interArea / float(boxAArea + boxBArea - interArea)
+    return iou
+
+
+# Only add after checking if the box does not overlap with another 
+# and that it has a higer probability if it does
+def add_new_box(box1, boxes, check=True):
+    if check:
+        dont_add_box = False
+        to_delete = []
+
+        for iter2, box2 in enumerate(boxes):
+            # Over 90% overlap?
+            if bbox_iou(box1, box2) > 0.9:
+                # Which one has a higher probability?
+                if box1[4] > box2[4]:
+                    to_delete.append(iter2)
+                else:
+                    dont_add_box = True
+                    break
+
+        if dont_add_box:
+            return False
+
+        # Delete last indices first
+        for item in sorted(to_delete, reverse=True):
+            boxes.pop(item)
+
+    boxes.append(box1)
+    return True
+
+
 class ObjectModel:
     def __init__(self, device_id, face_weights, objects_weights):
         self.device = select_device(device_id)
         self.face = attempt_load(face_weights, map_location=self.device)
-        self.objects = attempt_load(objects_weights, map_location=self.device)
+        self.objects = []
+        for objw in list(objects_weights):
+            self.objects.append(attempt_load(objw, map_location=self.device))
 
 
 def face_and_objects_detect(model, img0, imgsz=640, augment=False):
@@ -136,35 +178,36 @@ def face_and_objects_detect(model, img0, imgsz=640, augment=False):
     gn = torch.tensor(img0.shape)[[1, 0, 1, 0]].to(model.device)  # normalization gain whwh
     h, w, c = img0.shape
 
-    # Get class names
-    names = model.objects.module.names if hasattr(model.objects, 'module') else model.objects.names
-
     # Objects Inference
 
-    pred = model.objects(img, augment=augment)[0]
-    # Apply NMS
-    det = non_max_suppression(pred, conf_thres=0.5, iou_thres=0.45, max_det=16)[0]
+    for it, obj_model in enumerate(model.objects):
+        # Get class names
+        names = obj_model.module.names if hasattr(obj_model, 'module') else obj_model.names
 
-    if det is not None:
-        det[:, :4] = scale_coords(img.shape[2:], det[:, :4], img0.shape).round()
-        for j, (*xyxy, conf, cls) in enumerate(det):
-            xywh = (xyxy2xywh(det[j, :4].view(1, 4)) / gn).view(-1)
-            xywh = xywh.data.cpu().numpy()
+        pred = obj_model(img, augment=augment)[0]
+        # Apply NMS
+        det = non_max_suppression(pred, conf_thres=0.5, iou_thres=0.45, max_det=16)[0]
 
-            x1 = int(xywh[0] * w - 0.5 * xywh[2] * w)
-            y1 = int(xywh[1] * h - 0.5 * xywh[3] * h)
-            x2 = int(xywh[0] * w + 0.5 * xywh[2] * w)
-            y2 = int(xywh[1] * h + 0.5 * xywh[3] * h)
-            conf = round(float(conf.cpu().numpy()), 3)
+        if det is not None:
+            det[:, :4] = scale_coords(img.shape[2:], det[:, :4], img0.shape).round()
+            for j, (*xyxy, conf, cls) in enumerate(det):
+                xywh = (xyxy2xywh(det[j, :4].view(1, 4)) / gn).view(-1)
+                xywh = xywh.data.cpu().numpy()
 
-            # Get class name
-            icls = int(cls)  # integer class
-            name = names[icls]
+                x1 = int(xywh[0] * w - 0.5 * xywh[2] * w)
+                y1 = int(xywh[1] * h - 0.5 * xywh[3] * h)
+                x2 = int(xywh[0] * w + 0.5 * xywh[2] * w)
+                y2 = int(xywh[1] * h + 0.5 * xywh[3] * h)
+                conf = round(float(conf.cpu().numpy()), 3)
 
-            boxes.append([x1, y1, x2 - x1, y2 - y1, conf, name])
+                # Get class name
+                icls = int(cls)  # integer class
+                name = names[icls]
 
-            if DEBUG:
-                plot_one_box(xyxy, img0, label=f'{name} {conf:.2f}', color=colors(cls, True))
+                add_new_box([x1, y1, x2 - x1, y2 - y1, conf, name], boxes, check=(it > 0))
+
+                if DEBUG:
+                    Annotator(img0, pil=False).box_label(xyxy, label=f'{name} {conf:.2f}', color=colors(cls, True))
 
     # Face Inference
 
@@ -189,7 +232,7 @@ def face_and_objects_detect(model, img0, imgsz=640, augment=False):
             boxes.append([x1, y1, x2 - x1, y2 - y1, conf, "face"])
 
             if DEBUG:
-                plot_one_box(xyxy, img0, label=f'face {conf:.2f}', color=colors(1, True))
+                Annotator(img0, pil=False).box_label(xyxy, label=f'face {conf:.2f}', color=colors(1, True))
 
     return boxes
 
@@ -199,7 +242,10 @@ def infer_image(
         img_file,
         device='0',
         face_weights='weights/yolov5s-face.pt',
-        objects_weights='weights/yolov5m.pt'
+        objects_weights=[
+            'weights/yolov5m.pt',
+            'weights/yolov5s-pp.pt',
+        ]
 ):
 
     model = ObjectModel(device, face_weights, objects_weights)
