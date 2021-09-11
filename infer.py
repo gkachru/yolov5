@@ -14,7 +14,7 @@ from utils.general import (
 )
 from utils.torch_utils import select_device
 
-DEBUG = True
+DEBUG = False
 
 if DEBUG:
     from utils.plots import colors, Annotator
