@@ -103,6 +103,30 @@ def get_latest_run(search_dir='.'):
     return max(last_list, key=os.path.getctime) if last_list else ''
 
 
+def user_config_dir(dir='Ultralytics'):
+    # Return path of user configuration directory (make if necessary)
+    cfg = {'Windows': 'AppData/Roaming', 'Linux': '.config', 'Darwin': 'Library/Application Support'}  # 3 config dirs
+    path = Path.home() / cfg.get(platform.system(), '')  # OS-specific config dir
+    path = (path if is_writeable(path) else Path('/tmp')) / dir  # GCP and AWS lambda fix, only /tmp is writeable
+    path.mkdir(exist_ok=True)  # make if required
+    return path
+
+
+def is_writeable(dir, test=False):
+    # Return True if directory has write permissions, test opening a file with write permissions if test=True
+    if test:  # method 1
+        file = Path(dir) / 'tmp.txt'
+        try:
+            with open(file, 'w'):  # open file with write permissions
+                pass
+            file.unlink()  # remove file
+            return True
+        except IOError:
+            return False
+    else:  # method 2
+        return os.access(dir, os.R_OK)  # possible issues on Windows
+
+
 def is_docker():
     # Is environment a Docker container?
     return Path('/workspace').exists()  # or Path('/.dockerenv').exists()
@@ -242,8 +266,23 @@ def check_imshow():
         return False
 
 
-def check_file(file):
+def check_suffix(file='yolov5s.pt', suffix=('.pt',), msg=''):
+    # Check file(s) for acceptable suffixes
+    if file and suffix:
+        if isinstance(suffix, str):
+            suffix = [suffix]
+        for f in file if isinstance(file, (list, tuple)) else [file]:
+            assert Path(f).suffix.lower() in suffix, f"{msg}{f} acceptable suffix is {suffix}"
+
+
+def check_yaml(file, suffix=('.yaml', '.yml')):
+    # Search/download YAML file (if necessary) and return path, checking suffix
+    return check_file(file, suffix)
+
+
+def check_file(file, suffix=''):
     # Search/download file (if necessary) and return path
+    check_suffix(file, suffix)  # optional
     file = str(file)  # convert to str()
     if Path(file).is_file() or file == '':  # exists
         return file
