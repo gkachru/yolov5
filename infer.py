@@ -151,11 +151,20 @@ def add_new_box(box1, boxes, check=True):
 class ObjectModel:
     def __init__(self, device_id, face_weights, objects_weights):
         self.device = select_device(device_id)
-        self.face = attempt_load(face_weights, map_location=self.device)
+        self.face = self.attempt_load(face_weights)
         self.objects = []
         for objw in list(objects_weights):
-            self.objects.append(attempt_load(objw, map_location=self.device))
+            self.objects.append(self.attempt_load(objw))
 
+    def attempt_load(self, weights):
+        return self.upsample_hack(attempt_load(weights, map_location=self.device))
+
+    def upsample_hack(self, model):
+        if model is not None:
+            for m in model.modules():
+                if isinstance(m, torch.nn.Upsample):
+                    m.recompute_scale_factor = None
+        return model
 
 def face_and_objects_detect(model, img0, imgsz=640, augment=False):
     stride = int(model.face.stride.max())  # model stride
